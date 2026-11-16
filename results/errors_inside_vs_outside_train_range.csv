@@ -1,8 +1,8 @@
 model,train_range,n,RMSE
 LinearRegression,inside,128,8.049366059115064
 LinearRegression,outside,10,11.645278984663005
-RandomForest,inside,128,5.861483248519487
-RandomForest,outside,10,12.139602715554252
+RandomForest,inside,128,5.861483248519485
+RandomForest,outside,10,12.139602715554256
 SVR,inside,128,6.0832468090407374
 SVR,outside,10,12.090049832874069
 MLP-A,inside,128,6.38399216907082

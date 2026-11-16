@@ -192,23 +192,74 @@ def plot_test_metrics(table, path):
     _save(fig, path)
 
 
-def plot_group_errors(bd, groups, path, title, xlabel):
+METRIC_LABELS = {
+    "RMSE": "RMSE (MPa)",
+    "MAE": "MAE (MPa)",
+    "MAPE": "MAPE (%)",
+    "bias": "Bias: predicted − actual (MPa)",
+}
+
+
+def plot_group_errors(bd, groups, path, title, xlabel, metrics=("RMSE",)):
+    """Grouped bars per model; one stacked panel per metric."""
     models = [m for m in C.MODEL_ORDER if m in set(bd["model"])]
     groups = [g for g in groups if g in set(bd["group"])]
     x = np.arange(len(groups))
     width = 0.84 / len(models)
-    fig, ax = plt.subplots(figsize=(8.5, 3.8))
-    for i, m in enumerate(models):
-        sub = bd[bd["model"] == m].set_index("group").reindex(groups)
-        ax.bar(x - 0.42 + width * (i + 0.5), sub["RMSE"], width=width,
-               color=MODEL_COLORS[m], edgecolor=SURFACE, linewidth=1, label=m)
-    counts = bd.drop_duplicates("group").set_index("group")["n"]
-    ax.set_xticks(x, [f"{g}\n(n={counts[g]})" for g in groups])
-    ax.grid(axis="x", visible=False)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("RMSE (MPa)")
-    ax.legend(ncol=len(models), loc="lower left", bbox_to_anchor=(0, 1.0), handlelength=1, columnspacing=1)
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(8.5, 3.1 * len(metrics) + 0.7),
+                             sharex=True, squeeze=False)
+    axes = axes[:, 0]
+    for ax, metric in zip(axes, metrics):
+        for i, m in enumerate(models):
+            sub = bd[bd["model"] == m].set_index("group").reindex(groups)
+            ax.bar(x - 0.42 + width * (i + 0.5), sub[metric], width=width,
+                   color=MODEL_COLORS[m], edgecolor=SURFACE, linewidth=1, label=m)
+        if metric == "bias":
+            ax.axhline(0, color=MUTED, lw=1)
+        ax.grid(axis="x", visible=False)
+        ax.set_ylabel(METRIC_LABELS.get(metric, metric))
+    first = bd.drop_duplicates("group").set_index("group")
+    if "n_unique" in first:
+        labels = [f"{g}\n(n={first.loc[g, 'n']}, {first.loc[g, 'n_unique']} unique)" for g in groups]
+    else:
+        labels = [f"{g}\n(n={first.loc[g, 'n']})" for g in groups]
+    axes[-1].set_xticks(x, labels)
+    axes[-1].set_xlabel(xlabel)
+    axes[0].legend(ncol=len(models), loc="lower left", bbox_to_anchor=(0, 1.0),
+                   handlelength=1, columnspacing=1)
     _suptitle(fig, title)
+    fig.tight_layout()
+    _save(fig, path)
+
+
+def plot_paired_differences(rep, comparisons, path, metric="RMSE"):
+    """Split-wise metric differences (a - b) with mean and corrected 95% CI.
+
+    rep: long table (seed, model, metric); comparisons: output of
+    evaluate.paired_comparison.
+    """
+    wide = rep.pivot(index="seed", columns="model", values=metric)
+    comps = comparisons.reset_index(drop=True)
+    ypos = np.arange(len(comps))
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(7.6, 0.55 * len(comps) + 1.5))
+    ax.axvline(0, color=MUTED, lw=1, zorder=1)
+    for y_, row in zip(ypos, comps.itertuples()):
+        d = (wide[row.model_a] - wide[row.model_b]).to_numpy()
+        color = MODEL_COLORS[row.model_a]
+        ax.scatter(d, y_ + rng.uniform(-0.17, 0.17, len(d)), s=16, color=color, alpha=0.45,
+                   edgecolor="none", zorder=2)
+        ax.errorbar(row.mean_diff, y_, xerr=[[row.mean_diff - row.ci95_low], [row.ci95_high - row.mean_diff]],
+                    fmt="D", ms=6, color=INK, ecolor=INK, elinewidth=1.6, capsize=3, zorder=3)
+        ax.text(1.01, y_, f"{row.mean_diff:+.2f}  ({row.a_better_count}/{row.n_splits})",
+                transform=ax.get_yaxis_transform(), va="center", fontsize=8, color=INK)
+    ax.set_yticks(ypos, [f"{r.model_a} − {r.model_b}" for r in comps.itertuples()])
+    ax.invert_yaxis()
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel(f"Test {metric} difference (MPa); negative = first model better")
+    _suptitle(fig, "Paired model comparison over repeated group splits")
+    ax.set_title("dots: individual splits · diamond: mean with corrected 95% CI · right: mean (wins)",
+                 fontsize=8, fontweight="normal", color=INK2)
     fig.tight_layout()
     _save(fig, path)
 

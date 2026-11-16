@@ -25,7 +25,13 @@ results/                     tables, summary.md, figures/ (generated)
   MLP-A (32), MLP-B (128-64-32), MLP-C (MLP-B + dropout + L2).
   ANNs: ReLU, linear output, MSE, Adam, early stopping on validation loss.
 - Hyperparameters chosen on validation RMSE; **test set evaluated once**.
-- Robustness: refit with the chosen hyperparameters on 5 seeds, mean ± std.
+- Robustness: the whole protocol (grouped split → tuning on that split's validation
+  set → test) is repeated on 20 seeds, so no split's test mixes influence its model
+  choice; mean ± std reported.
+- Model comparison: paired split-wise RMSE differences with the corrected resampled
+  t-test (Nadeau & Bengio, 2003) and Wilcoxon signed-rank test, Holm-adjusted.
+- Error analysis by curing age (1-3, 7, 14-28, 56-100, 120-365 d) and actual strength
+  range (RMSE, MAE, bias, MAPE), on the main test set and pooled over all 20 splits.
 
 ## Run
 ```
@@ -39,7 +45,9 @@ Tested with Python 3.15 + PyTorch (CPU).
 `test_results.csv`, `best_params.json`, `tuning_<model>.csv`, `errors_by_age_group.csv`,
 `errors_by_strength_group.csv`, `worst_test_cases.csv`,
 `errors_inside_vs_outside_train_range.csv`, `repeated_splits_summary.csv`,
-`summary.md`, and `figures/*.png`.
+`repeated_splits_raw.csv`, `repeated_best_params.csv`, `repeated_test_predictions.csv`,
+`paired_comparisons.csv`, `repeated_errors_by_age_group.csv`,
+`repeated_errors_by_strength_group.csv`, `summary.md`, and `figures/*.png`.
 
 ## External resources and references
 **Dataset**
@@ -63,6 +71,10 @@ Tested with Python 3.15 + PyTorch (CPU).
 - Random Forest — Breiman (2001), *Machine Learning*, 45, 5-32.
 - SVR — Drucker et al. (1997), NeurIPS 9; Smola & Schölkopf (2004), *Statistics and
   Computing*, 14, 199-222.
+- Corrected resampled t-test — Nadeau & Bengio (2003), *Inference for the generalization
+  error*, Machine Learning, 52, 239-281.
+- Holm (1979), *A simple sequentially rejective multiple test procedure*, Scandinavian
+  Journal of Statistics, 6, 65-70.
 
 **Reused resources / tools**
 - No code was copied from external projects.

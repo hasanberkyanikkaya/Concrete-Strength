@@ -129,21 +129,18 @@ def main():
     P.plot_group_errors(by_strength, C.STRENGTH_LABELS, figs / "errors_by_strength_group.png",
                         "Test RMSE by actual strength range", "Actual strength")
 
-    # 6) Robustness: repeated group splits ----------------------------------
-    repeat_summary = None
+    # 6) Robustness: repeated group splits, re-tuned on every split ---------
+    repeat = None
     if not args.no_repeats:
         seeds = C.REPEAT_SEEDS[:2] if args.fast else C.REPEAT_SEEDS
-        log(f"\n== 6. Repeated group splits, seeds {list(seeds)} (best params from seed {C.MAIN_SEED})")
-        rep_rows = []
-        for seed in seeds:
-            data_s = D.make_arrays(df, D.group_split(df, seed))
-            for name in model_names:
-                res = M.fit(name, best_params[name], seed, data_s, fast=args.fast)
-                m = E.regression_metrics(data_s.y_test, res.model.predict(data_s.X_test))
-                rep_rows.append({"seed": seed, "model": name, **m})
-            log(f"   seed {seed} done")
-        rep = pd.DataFrame(rep_rows)
+        log(f"\n== 6. Repeated group splits: {len(seeds)} seeds, every model re-tuned on each "
+            f"split's own validation set")
+        rep, params_rep, pooled, ratio = run_repeats(df, seeds, model_names, (results, data, split),
+                                                     fast=args.fast)
         rep.to_csv(out / "repeated_splits_raw.csv", index=False)
+        params_rep.to_csv(out / "repeated_best_params.csv", index=False)
+        pooled.to_csv(out / "repeated_test_predictions.csv", index=False)
+
         repeat_summary = rep.groupby("model")[["RMSE", "MAE", "R2"]].agg(["mean", "std"])
         repeat_summary.columns = [f"{a}_{b}" for a, b in repeat_summary.columns]
         repeat_summary = repeat_summary.reindex(model_names)
@@ -151,13 +148,76 @@ def main():
         log(repeat_summary.round(3).to_string())
         P.plot_repeat_summary(repeat_summary, figs / "repeated_splits_rmse.png")
 
+        comparisons = E.paired_comparison(rep, C.COMPARISONS, ratio)
+        comparisons.to_csv(out / "paired_comparisons.csv", index=False)
+        log(f"\n   Paired comparisons (RMSE_a - RMSE_b; corrected t-test, n_test/n_train = {ratio:.3f}):")
+        log(comparisons[["comparison", "mean_diff", "ci95_low", "ci95_high", "a_better_count",
+                         "p_corrected_t_holm", "p_wilcoxon_holm"]].round(3).to_string(index=False))
+        P.plot_paired_differences(rep, comparisons, figs / "paired_differences.png")
+
+        # Error breakdown pooled over all splits' test predictions
+        y_pool = pooled[C.TARGET].to_numpy()
+        preds_pool = {n: pooled[f"pred_{n}"].to_numpy() for n in model_names}
+        age_g = pd.Categorical(pooled["age_group"], categories=C.AGE_LABELS, ordered=True)
+        str_g = pd.Categorical(pooled["strength_group"], categories=C.STRENGTH_LABELS, ordered=True)
+        age_pool = E.group_breakdown(pd.Series(age_g), y_pool, preds_pool, ids=pooled["row"])
+        str_pool = E.group_breakdown(pd.Series(str_g), y_pool, preds_pool, ids=pooled["row"])
+        age_pool.to_csv(out / "repeated_errors_by_age_group.csv", index=False)
+        str_pool.to_csv(out / "repeated_errors_by_strength_group.csv", index=False)
+        P.plot_group_errors(age_pool, C.AGE_LABELS, figs / "repeated_errors_by_age_group.png",
+                            f"Error by curing age, pooled over {len(seeds)} group splits", "Curing age",
+                            metrics=("RMSE", "MAPE"))
+        P.plot_group_errors(str_pool, C.STRENGTH_LABELS, figs / "repeated_errors_by_strength_group.png",
+                            f"Error by actual strength, pooled over {len(seeds)} group splits",
+                            "Actual strength", metrics=("RMSE", "bias"))
+        repeat = {"summary": repeat_summary, "comparisons": comparisons, "params": params_rep,
+                  "age": age_pool, "strength": str_pool, "n_seeds": len(seeds), "ratio": ratio}
+
     # 7) Markdown summary ---------------------------------------------------
-    write_summary(out, report, summary_split, results_table, best_params, by_age, repeat_summary,
+    write_summary(out, report, summary_split, results_table, best_params, by_age, repeat,
                   worst, extrap, args)
     log(f"\nDone in {time.perf_counter() - t_start:.0f} s. Results in {out}")
 
 
-def write_summary(out, report, split_df, results_table, best_params, by_age, repeat_summary,
+def run_repeats(df, seeds, model_names, main, fast=False):
+    """Repeat the whole protocol (split -> tune on validation -> test) on several seeds.
+
+    Hyperparameters are selected anew on every split's own validation set, so
+    no split's test mixes ever influence its model choice. The main-seed
+    split reuses the models already tuned in step 3 (same procedure).
+    """
+    main_results, main_data, main_split = main
+    quiet = lambda *_: None
+    metric_rows, param_rows, pooled, ratios = [], [], [], []
+    for seed in seeds:
+        t0 = time.perf_counter()
+        if seed == C.MAIN_SEED:
+            split_s, data_s, fitted = main_split, main_data, main_results
+        else:
+            split_s = D.group_split(df, seed)
+            data_s = D.make_arrays(df, split_s)
+            fitted = {}
+            for name in model_names:
+                base = fitted["MLP-B"].params if name == "MLP-C" else None
+                fitted[name], _ = M.tune(name, seed, data_s, base_params=base, fast=fast, log=quiet)
+        ratios.append(len(split_s.test) / len(split_s.train))
+
+        part = df.iloc[split_s.test][["mix_id", "age", "age_group", "strength_group", C.TARGET]].copy()
+        part.insert(0, "row", split_s.test)
+        part.insert(0, "seed", seed)
+        for name in model_names:
+            p = fitted[name].model.predict(data_s.X_test)
+            part[f"pred_{name}"] = p
+            metric_rows.append({"seed": seed, "model": name, **E.regression_metrics(data_s.y_test, p)})
+            param_rows.append({"seed": seed, "model": name, "val_RMSE": fitted[name].val_rmse,
+                               "params": json.dumps(fitted[name].params, default=str)})
+        pooled.append(part)
+        log(f"   seed {seed:>5} done in {time.perf_counter() - t0:5.1f} s")
+    return (pd.DataFrame(metric_rows), pd.DataFrame(param_rows),
+            pd.concat(pooled, ignore_index=True), float(np.mean(ratios)))
+
+
+def write_summary(out, report, split_df, results_table, best_params, by_age, repeat,
                   worst, extrap, args):
     lines = ["# Experiment summary", ""]
     if args.fast:
@@ -170,6 +230,7 @@ def write_summary(out, report, split_df, results_table, best_params, by_age, rep
     lines += ["## Best hyperparameters (chosen on validation RMSE)", ""]
     lines += [f"- **{k}**: `{v}`" for k, v in best_params.items()] + [""]
     pivot = by_age.pivot(index="model", columns="group", values="RMSE").reindex(results_table.index)
+    pivot = pivot[[g for g in C.AGE_LABELS if g in pivot.columns]]
     lines += ["## Test RMSE by curing-age group (MPa)", "", E.md_table(pivot.reset_index()), ""]
     ex = extrap.pivot(index="model", columns="train_range", values="RMSE").reindex(results_table.index)
     n_out = int(extrap.loc[extrap["train_range"] == "outside", "n"].max()) if (extrap["train_range"] == "outside").any() else 0
@@ -178,9 +239,34 @@ def write_summary(out, report, split_df, results_table, best_params, by_age, rep
     cols = ["mix_id", "age", "w_c", "actual", "mean_abs_err", "outside_train_range"]
     lines += ["## Hardest test samples (largest mean |error| over all models)", "",
               E.md_table(worst[cols].head(10)), ""]
-    if repeat_summary is not None:
-        lines += ["## Repeated group splits (mean / std over seeds)", "",
-                  E.md_table(repeat_summary.reset_index()), ""]
+    if repeat is not None:
+        k = repeat["n_seeds"]
+        lines += [f"## Repeated group splits ({k} seeds, re-tuned on each split; mean / std)", "",
+                  E.md_table(repeat["summary"].reset_index()), ""]
+        cmp_cols = ["comparison", "mean_diff", "std_diff", "ci95_low", "ci95_high", "a_better_count",
+                    "p_corrected_t", "p_corrected_t_holm", "p_wilcoxon_holm"]
+        lines += ["## Paired comparisons (RMSE_a - RMSE_b, negative = a better)", "",
+                  f"Corrected resampled t-test (Nadeau & Bengio, 2003), n_test/n_train = "
+                  f"{repeat['ratio']:.3f}; CI uses the corrected standard error; "
+                  f"`a_better_count` = splits (of {k}) where a had lower RMSE; p-values Holm-adjusted.", "",
+                  E.md_table(repeat["comparisons"][cmp_cols]), ""]
+        for key, title, metrics in (("age", "curing-age group", ("RMSE", "MAPE", "bias")),
+                                    ("strength", "actual-strength group", ("RMSE", "MAPE", "bias"))):
+            bd = repeat[key]
+            counts = bd.drop_duplicates("group")[["group", "n", "n_unique"]]
+            lines += [f"## Pooled test error by {title} ({k} splits)", "",
+                      "Predictions pooled over all splits; `n` = pooled predictions, "
+                      "`n_unique` = distinct samples.", "", E.md_table(counts), ""]
+            for metric in metrics:
+                pv = bd.pivot(index="model", columns="group", values=metric).reindex(
+                    repeat["summary"].index)
+                pv = pv[[g for g in bd["group"].unique()]]
+                lines += [f"**{metric}**", "", E.md_table(pv.reset_index()), ""]
+        freq = (repeat["params"].groupby(["model", "params"]).size().rename("splits")
+                .reset_index().sort_values(["model", "splits"], ascending=[True, False]))
+        top = freq.groupby("model").head(1).set_index("model").reindex(repeat["summary"].index)
+        lines += ["## Hyperparameter stability (most frequent choice across splits)", "",
+                  E.md_table(top.reset_index()), ""]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
 

@@ -18,11 +18,24 @@ FEATURES = MIX_COLUMNS + ["log_age", "w_c", "w_b"]
 # Grouped (by mix ID) train / validation / test split.
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
 MAIN_SEED = 42
-REPEAT_SEEDS = (42, 7, 123, 2024, 31415)
+# Repeated group splits: every model is re-tuned on each split's own validation set.
+REPEAT_SEEDS = (42, 7, 123, 2024, 31415) + tuple(s for s in range(1, 17) if s != 7)   # 20 splits
+assert len(set(REPEAT_SEEDS)) == len(REPEAT_SEEDS) == 20, "repeat seeds must be unique"
+
+# Paired comparisons on the repeated splits: (a, b) reports RMSE_a - RMSE_b.
+COMPARISONS = [
+    ("MLP-B", "MLP-A"),              # does depth help?
+    ("MLP-C", "MLP-B"),              # does dropout + L2 help?
+    ("MLP-B", "RandomForest"),
+    ("MLP-B", "SVR"),
+    ("RandomForest", "SVR"),
+    ("MLP-A", "LinearRegression"),
+]
 
 # Curing-age and strength groups for the error breakdown.
-AGE_BINS = (0, 7, 28, 100, 365)
-AGE_LABELS = ("1-7 d", "14-28 d", "56-100 d", "120-365 d")
+# Early age is split into 1-3 d and 7 d (ages in the data: 1, 3, 7, 14, 28, 56, 90, 91, 100, ...).
+AGE_BINS = (0, 3, 7, 28, 100, 365)
+AGE_LABELS = ("1-3 d", "7 d", "14-28 d", "56-100 d", "120-365 d")
 STRENGTH_BINS = (0, 20, 40, 60, float("inf"))
 STRENGTH_LABELS = ("<20 MPa", "20-40 MPa", "40-60 MPa", ">60 MPa")
 
